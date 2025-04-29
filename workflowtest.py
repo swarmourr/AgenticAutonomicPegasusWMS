@@ -12,11 +12,7 @@ class Falcon_7bWorkflow:
         :param base_dir: Base directory for the workflow (default: current directory)
         """
         self.base_dir = base_dir
-        
-        # Change to the workflow directory for all operations
-        # This ensures catalog files are written to the correct location
         os.chdir(self.base_dir)
-        
         self.wf = Workflow(name="falcon-7b")
         self.sites = SiteCatalog()
         self.replicas = ReplicaCatalog()
@@ -44,7 +40,7 @@ class Falcon_7bWorkflow:
 
         transformation = Transformation("FineTuneLLM", site="condorpool", pfn="/home/hsafri/LLM-Fine-Tune/bin/finetune.py", is_stageable=True)
         transformation.add_profiles(Namespace.PEGASUS, key="cores", value="4")
-        transformation.add_profiles(Namespace.PEGASUS, key="memory", value="16384")  # Increased memory from 10600 to 16384
+        transformation.add_profiles(Namespace.PEGASUS, key="memory", value="10600")
         transformation.add_profiles(Namespace.PEGASUS, key="gpus", value="1")
         self.transformations.add_transformations(transformation)
 
@@ -62,10 +58,6 @@ class Falcon_7bWorkflow:
         return self.files[name]
 
     def write(self):
-        """
-        Write the site, replica, transformation, and workflow to their respective catalogs and files.
-        """
-        # Write all catalog files
         self.sites.write()
         self.replicas.write()
         self.transformations.write()
@@ -73,12 +65,7 @@ class Falcon_7bWorkflow:
 
 if __name__ == "__main__":
     import os
-    import sys
-    
-    # Get the directory where this script is located
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # Initialize workflow with current directory
     w = Falcon_7bWorkflow(base_dir=current_dir)
     w.build_sites()
     w.build_replicas()
