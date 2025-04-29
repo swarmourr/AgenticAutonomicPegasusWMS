@@ -115,11 +115,14 @@ You must **always** return your output strictly as a valid JSON object with the 
 ⚠️ No additional text, no markdown, no explanations outside of the JSON object. Only the JSON object must be returned. 
 Failure to comply can cause system malfunction.
 
+⚠️ If you need more details about the failed job you can ask  for more logs for the failed jobs in this format:
+{ "job_id": "job_id" , "status" :"logs needed" } and you will get the logs for this job.
 Tools: 
 
 - You have access also to the this Tools:
     1. PegasusWorkflowGenerator: A tool to generate Pegasus workflows from python file.You can use this tool to generate workflows based on the provided Python code. PegasusworkflowGenerator.py <python_file_path>.
     2. PegasusPlanSubmission: A tool to submit Pegasus workflows. You can use this tool to submit the generated workflows for execution. PegasusPlanSubmission.py <Genrated_yaml_workflow_file_path>.
+    3. JobsLogs: A tool to get the logs of the failed jobs. You can use this tool to get the logs of the failed jobs. JobsLogs.py <job_id>.
     """
 
 class WorkflowAnalyzer:
@@ -204,7 +207,25 @@ class PegasusAgent:
             response = await self.llm.acomplete(
                 prompt=f"{mape_k_system_prompt}\n\nEvent:\n{event_str}"
             )
-            return self._validate_response(response.text)
+
+            print("Response from LLM:", response.text)
+            validated_response = self._validate_response(response.text)
+
+            # Check if the response indicates more logs are needed
+            if validated_response.get("status") == "logs needed":
+                job_id = validated_response.get("job_id", "unknown_job_id")
+                return {
+                    "job_id": job_id,
+                    "status": "logs needed"
+                }
+
+            # Schema for normal analysis
+            return {
+                "analysis": validated_response.get("analysis", {}),
+                "plan": validated_response.get("plan", {}),
+                "execution": validated_response.get("execution", {}),
+                "knowledge_update": validated_response.get("knowledge_update", {})
+            }
         except Exception as e:
             logger.error(f"Erreur lors de l'analyse de l'événement: {str(e)}")
             return {
@@ -215,25 +236,22 @@ class PegasusAgent:
     def _validate_response(self, response: str) -> Dict[str, Any]:
         """Valide et nettoie la réponse de l'agent"""
         try:
-            # Extraire le JSON si la réponse est une chaîne contenant du JSON
+            # Extract the first valid JSON object from the response
             if isinstance(response, str):
-                # Rechercher un objet JSON valide dans la réponse
-                json_match = re.search(r'(\{.*\})', response, re.DOTALL)
+                json_match = re.search(r'(\{.*?\})', response, re.DOTALL)
                 if json_match:
                     response = json.loads(json_match.group(1))
                 else:
-                    try:
-                        response = json.loads(response)
-                    except json.JSONDecodeError:
-                        raise ValueError("La réponse ne contient pas de JSON valide")
-            
+                    raise ValueError("La réponse ne contient pas de JSON valide")
+
+            # Ensure all required keys are present
             required_keys = ["analysis", "plan", "execution", "knowledge_update"]
             for key in required_keys:
                 if key not in response:
                     raise ValueError(f"Clé manquante dans la réponse: {key}")
-            
-            corrected_code = response["execution"]["corrected_generated_code"]
-            print("Code corrigé:", corrected_code)
+
+            # Check for forbidden patterns in corrected code
+            corrected_code = response["execution"].get("corrected_generated_code", "")
             forbidden_patterns = [
                 "rest of the generated code",
                 "rest of the code",
@@ -243,9 +261,15 @@ class PegasusAgent:
                 "…"
             ]
             if any(pattern in corrected_code for pattern in forbidden_patterns):
-                print("⚠️ Le code retourné n'est pas complet. Merci de reformuler la demande ou d'ajuster le prompt système.")
-            
+                logger.warning("⚠️ Le code retourné n'est pas complet. Merci de reformuler la demande ou d'ajuster le prompt système.")
+
             return response
+        except json.JSONDecodeError as e:
+            logger.error(f"Erreur de décodage JSON: {str(e)}")
+            return {
+                "error": "Invalid JSON format",
+                "details": str(e)
+            }
         except Exception as e:
             logger.error(f"Erreur de validation de la réponse: {str(e)}")
             return {
@@ -281,31 +305,54 @@ async def main():
     
     # Exemple d'événement de workflow échoué plus détaillé
     example_event = {
-  "timestamp": "2025-04-25 14:50:19",
-  "workflow_id": "ac9b9fff-3d93-437f-be89-005469f944e7",
-  "directory": "/home/hsafri/LLM-Fine-Tune/generated_workflows/hsafri/pegasus/falcon-7b/run0055",
-  "held_jobs": [
-    {
-      "job_id": "FineTuneLLM_ID0000001",
-      "status": "Held",
-      "hold_reason": "Error from slot1_1@testpool-gpu-20250425144144.novalocal: Job has gone over cgroup memory limit of 10624 megabytes. Last measured usage: 404 megabytes.  Consider resubmitting with a higher request_memory.",
-      "site": "condorpool",
-      "cmd": "/home/hsafri/LLM-Fine-Tune/generated_workflows/hsafri/pegasus/falcon-7b/run0055/00/00/FineTuneLLM_ID0000001.sh",
-      "condor_platform": "$CondorPlatform: x86_64_AlmaLinux8 $",
-      "condor_version": "$CondorVersion: 24.6.0 2025-03-05 BuildID: 790852 PackageID: 24.6.0-1 $",
-      "job_priority": 20
-    }
-  ],
-  "analyzer_output": "Database version: '5.1.0dev' (sqlite:////home/hsafri/LLM-Fine-Tune/generated_workflows/hsafri/pegasus/falcon-7b/run0055/falcon-7b-0.stampede.db)\n\n************************************Summary*************************************\n\n Submit Directory   : /home/hsafri/LLM-Fine-Tune/generated_workflows/hsafri/pegasus/falcon-7b/run0055\n Workflow Status    : running\n Total jobs         :      5 (100.00%)\n # jobs succeeded   :      2 (40.00%)\n # jobs failed      :      0 (0.00%)\n # jobs held        :      1 (20.00%)\n # jobs unsubmitted :      3 (60.00%)\n\n*******************************Held jobs' details*******************************\n\n=============================FineTuneLLM_ID0000001==============================\n\nsubmit file            : FineTuneLLM_ID0000001.sub\nlast_job_instance_id   : 7\nreason                 :  Error from slot1_1@testpool-gpu-20250425144144.novalocal: Job has gone over cgroup memory limit of 10624 megabytes. Last measured usage: 404 megabytes.  Consider resubmitting with a higher request_memory.\n\n**************************************Done**************************************\n\npegasus-analyzer: end of status report\n\n\n",
-  "original_yaml": "/home/hsafri/LLM-Fine-Tune/generated_workflows/hsafri/pegasus/falcon-7b/run0055/falcon-7b.yml",
-  "generated_code": "from Pegasus.api import *\nimport os\n\nclass Falcon_7bWorkflow:\n    \"\"\"\n    A Pegasus workflow for falcon-7b.\n    \"\"\"\n    def __init__(self, base_dir=\".\"):\n        \"\"\"\n        Initialize the workflow, sites, replicas, transformations, and job containers.\n        \n        :param base_dir: Base directory for the workflow (default: current directory)\n        \"\"\"\n        self.base_dir = base_dir\n        \n        # Change to the workflow directory for all operations\n        # This ensures catalog files are written to the correct location\n        os.chdir(self.base_dir)\n        \n        self.wf = Workflow(name=\"falcon-7b\")\n        self.sites = SiteCatalog()\n        self.replicas = ReplicaCatalog()\n        self.transformations = TransformationCatalog()\n        self.files = {}\n        self.jobs = {}\n\n    def build_sites(self):\n        local = Site(\"local\")\n        local.add_directories(Directory(Directory.SHARED_SCRATCH, \"/home/hsafri/LLM-Fine-Tune/scratch\").add_file_servers(FileServer(\"file:///home/hsafri/LLM-Fine-Tune/scratch\", Operation.ALL)))\n        local.add_directories(Directory(Directory.LOCAL_STORAGE, \"/home/hsafri/LLM-Fine-Tune/output\").add_file_servers(FileServer(\"file:///home/hsafri/LLM-Fine-Tune/output\", Operation.ALL)))\n        self.sites.add_sites(local)\n\n        condorpool = Site(\"condorpool\")\n        condorpool.add_profiles(Namespace.CONDOR, key=\"universe\", value=\"vanilla\")\n        condorpool.add_profiles(Namespace.PEGASUS, key=\"style\", value=\"condor\")\n        self.sites.add_sites(condorpool)\n\n    def build_replicas(self):\n        self.replicas.add_replica(\"local\", \"pegasus_data\", \"/home/hsafri/LLM-Fine-Tune/data/data.json\")\n\n    def build_transformations(self):\n        container = Container(\"FineTuneLLM\", Container.SINGULARITY, \"docker://swarmourr/finetune-pegasus:amd64\", image_site=\"docker_hub\")\n        self.transformations.add_containers(container)\n\n        transformation = Transformation(\"FineTuneLLM\", site=\"condorpool\", pfn=\"/home/hsafri/LLM-Fine-Tune/bin/finetune.py\", is_stageable=True)\n        transformation.add_profiles(Namespace.PEGASUS, key=\"cores\", value=\"4\")\n        transformation.add_profiles(Namespace.PEGASUS, key=\"memory\", value=\"10600\")\n        transformation.add_profiles(Namespace.PEGASUS, key=\"gpus\", value=\"1\")\n        self.transformations.add_transformations(transformation)\n\n    def build_jobs(self):\n        job = Job(\"FineTuneLLM\", _id=\"ID0000001\")\n        job.add_args(\"--data_path\", \"pegasus_data\", \"--model_name\", \"tiiuae/falcon-7b\", \"--output_dir\", \"tiiuae/falcon-7b\", \"--num_train_epochs\", \"3\", \"--batch_size\", \"4\", \"--save_steps\", \"5000\", \"--learning_rate\", \"3e-05\", \"--gpu\", \"1\", \"--auth_token\", \"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\")\n        job.add_inputs(self._get_file(\"pegasus_data\"))\n        job.add_outputs(self._get_file(\"falcon-7b.zip\"), stage_out=True, register_replica=True)\n        self.jobs[\"ID0000001\"] = job\n        self.wf.add_jobs(job)\n\n    def _get_file(self, name):\n        if name not in self.files:\n            self.files[name] = File(name)\n        return self.files[name]\n\n    def write(self):\n        \"\"\"\n        Write the site, replica, transformation, and workflow to their respective catalogs and files.\n        \"\"\"\n        # Write all catalog files\n        self.sites.write()\n        self.replicas.write()\n        self.transformations.write()\n        self.wf.write()\n\nif __name__ == \"__main__\":\n    import os\n    import sys\n    \n    # Get the directory where this script is located\n    current_dir = os.path.dirname(os.path.abspath(__file__))\n    \n    # Initialize workflow with current directory\n    w = Falcon_7bWorkflow(base_dir=current_dir)\n    w.build_sites()\n    w.build_replicas()\n    w.build_transformations()\n    w.build_jobs()\n    w.write()\n    print(\"Workflow generated and written successfully in: \" + current_dir)"
-}
+        "timestamp": "2025-04-25 14:50:19",
+        "workflow_id": "ac9b9fff-3d93-437f-be89-005469f944e7",
+        "directory": "/home/hsafri/LLM-Fine-Tune/generated_workflows/hsafri/pegasus/falcon-7b/run0055",
+        "held_jobs": [
+            {
+            "job_id": "FineTuneLLM_ID0000001",
+            "status": "Held",
+            "hold_reason": "Error from slot1_1@testpool-gpu-20250425144144.novalocal: Job has gone over cgroup memory limit of 10624 megabytes. Last measured usage: 404 megabytes.  Consider resubmitting with a higher request_memory.",
+            "site": "condorpool",
+            "cmd": "/home/hsafri/LLM-Fine-Tune/generated_workflows/hsafri/pegasus/falcon-7b/run0055/00/00/FineTuneLLM_ID0000001.sh",
+            "condor_platform": "$CondorPlatform: x86_64_AlmaLinux8 $",
+            "condor_version": "$CondorVersion: 24.6.0 2025-03-05 BuildID: 790852 PackageID: 24.6.0-1 $",
+            "job_priority": 20
+            }
+        ],
+        "analyzer_output": "Database version: '5.1.0dev' (sqlite:////home/hsafri/LLM-Fine-Tune/generated_workflows/hsafri/pegasus/falcon-7b/run0055/falcon-7b-0.stampede.db)\n\n************************************Summary*************************************\n\n Submit Directory   : /home/hsafri/LLM-Fine-Tune/generated_workflows/hsafri/pegasus/falcon-7b/run0055\n Workflow Status    : running\n Total jobs         :      5 (100.00%)\n # jobs succeeded   :      2 (40.00%)\n # jobs failed      :      0 (0.00%)\n # jobs held        :      1 (20.00%)\n # jobs unsubmitted :      3 (60.00%)\n\n*******************************Held jobs' details*******************************\n\n=============================FineTuneLLM_ID0000001==============================\n\nsubmit file            : FineTuneLLM_ID0000001.sub\nlast_job_instance_id   : 7\nreason                 :  Error from slot1_1@testpool-gpu-20250425144144.novalocal: Job has gone over cgroup memory limit of 10624 megabytes. Last measured usage: 404 megabytes.  Consider resubmitting with a higher request_memory.\n\n**************************************Done**************************************\n\npegasus-analyzer: end of status report\n\n\n",
+        "original_yaml": "/home/hsafri/LLM-Fine-Tune/generated_workflows/hsafri/pegasus/falcon-7b/run0055/falcon-7b.yml",
+        "generated_code": "from Pegasus.api import *\nimport os\n\nclass Falcon_7bWorkflow:\n    \"\"\"\n    A Pegasus workflow for falcon-7b.\n    \"\"\"\n    def __init__(self, base_dir=\".\"):\n        \"\"\"\n        Initialize the workflow, sites, replicas, transformations, and job containers.\n        \n        :param base_dir: Base directory for the workflow (default: current directory)\n        \"\"\"\n        self.base_dir = base_dir\n        \n        # Change to the workflow directory for all operations\n        # This ensures catalog files are written to the correct location\n        os.chdir(self.base_dir)\n        \n        self.wf = Workflow(name=\"falcon-7b\")\n        self.sites = SiteCatalog()\n        self.replicas = ReplicaCatalog()\n        self.transformations = TransformationCatalog()\n        self.files = {}\n        self.jobs = {}\n\n    def build_sites(self):\n        local = Site(\"local\")\n        local.add_directories(Directory(Directory.SHARED_SCRATCH, \"/home/hsafri/LLM-Fine-Tune/scratch\").add_file_servers(FileServer(\"file:///home/hsafri/LLM-Fine-Tune/scratch\", Operation.ALL)))\n        local.add_directories(Directory(Directory.LOCAL_STORAGE, \"/home/hsafri/LLM-Fine-Tune/output\").add_file_servers(FileServer(\"file:///home/hsafri/LLM-Fine-Tune/output\", Operation.ALL)))\n        self.sites.add_sites(local)\n\n        condorpool = Site(\"condorpool\")\n        condorpool.add_profiles(Namespace.CONDOR, key=\"universe\", value=\"vanilla\")\n        condorpool.add_profiles(Namespace.PEGASUS, key=\"style\", value=\"condor\")\n        self.sites.add_sites(condorpool)\n\n    def build_replicas(self):\n        self.replicas.add_replica(\"local\", \"pegasus_data\", \"/home/hsafri/LLM-Fine-Tune/data/data.json\")\n\n    def build_transformations(self):\n        container = Container(\"FineTuneLLM\", Container.SINGULARITY, \"docker://swarmourr/finetune-pegasus:amd64\", image_site=\"docker_hub\")\n        self.transformations.add_containers(container)\n\n        transformation = Transformation(\"FineTuneLLM\", site=\"condorpool\", pfn=\"/home/hsafri/LLM-Fine-Tune/bin/finetune.py\", is_stageable=True)\n        transformation.add_profiles(Namespace.PEGASUS, key=\"cores\", value=\"4\")\n        transformation.add_profiles(Namespace.PEGASUS, key=\"memory\", value=\"10600\")\n        transformation.add_profiles(Namespace.PEGASUS, key=\"gpus\", value=\"1\")\n        self.transformations.add_transformations(transformation)\n\n    def build_jobs(self):\n        job = Job(\"FineTuneLLM\", _id=\"ID0000001\")\n        job.add_args(\"--data_path\", \"pegasus_data\", \"--model_name\", \"tiiuae/falcon-7b\", \"--output_dir\", \"tiiuae/falcon-7b\", \"--num_train_epochs\", \"3\", \"--batch_size\", \"4\", \"--save_steps\", \"5000\", \"--learning_rate\", \"3e-05\", \"--gpu\", \"1\", \"--auth_token\", \"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\")\n        job.add_inputs(self._get_file(\"pegasus_data\"))\n        job.add_outputs(self._get_file(\"falcon-7b.zip\"), stage_out=True, register_replica=True)\n        self.jobs[\"ID0000001\"] = job\n        self.wf.add_jobs(job)\n\n    def _get_file(self, name):\n        if name not in self.files:\n            self.files[name] = File(name)\n        return self.files[name]\n\n    def write(self):\n        \"\"\"\n        Write the site, replica, transformation, and workflow to their respective catalogs and files.\n        \"\"\"\n        # Write all catalog files\n        self.sites.write()\n        self.replicas.write()\n        self.transformations.write()\n        self.wf.write()\n\nif __name__ == \"__main__\":\n    import os\n    import sys\n    \n    # Get the directory where this script is located\n    current_dir = os.path.dirname(os.path.abspath(__file__))\n    \n    # Initialize workflow with current directory\n    w = Falcon_7bWorkflow(base_dir=current_dir)\n    w.build_sites()\n    w.build_replicas()\n    w.build_transformations()\n    w.build_jobs()\n    w.write()\n    print(\"Workflow generated and written successfully in: \" + current_dir)"
+        }
 
+    
+    example_event_1 = {
+    "timestamp": "2025-04-25 14:50:19",
+    "workflow_id": "ac9b9fff-3d93-437f-be89-005469f944e7",
+    "directory": "/home/hsafri/LLM-Fine-Tune/generated_workflows/hsafri/pegasus/falcon-7b/run0055",
+    "held_jobs": [
+        {
+        "job_id": "FineTuneLLM_ID0000001",
+        "status": "Held",
+        "hold_reason": "Error from slot1_1@testpool-gpu-20250425144144.novalocal: Job has gone over cgroup memory limit of 10624 megabytes. Last measured usage: 404 megabytes.  Consider resubmitting with a higher request_memory.",
+        "site": "condorpool",
+        "cmd": "/home/hsafri/LLM-Fine-Tune/generated_workflows/hsafri/pegasus/falcon-7b/run0055/00/00/FineTuneLLM_ID0000001.sh",
+        "condor_platform": "$CondorPlatform: x86_64_AlmaLinux8 $",
+        "condor_version": "$CondorVersion: 24.6.0 2025-03-05 BuildID: 790852 PackageID: 24.6.0-1 $",
+        "job_priority": 20
+        }
+    ],
+    "analyzer_output": "Database version: '5.1.0dev' (sqlite:////home/hsafri/LLM-Fine-Tune/generated_workflows/hsafri/pegasus/falcon-7b/run0063/falcon-7b-0.stampede.db)\nDatabase version: '5.1.0dev' (sqlite:////home/hsafri/LLM-Fine-Tune/generated_workflows/hsafri/pegasus/falcon-7b/run0063/falcon-7b-0.stampede.db)\nDatabase version: '5.1.0dev' (sqlite:////home/hsafri/LLM-Fine-Tune/generated_workflows/hsafri/pegasus/falcon-7b/run0063/falcon-7b-0.stampede.db)\nIt seems your workflow failed with zero failed jobs. Please check the dagman.out and the monitord.log file in /home/hsafri/LLM-Fine-Tune/generated_workflows/hsafri/pegasus/falcon-7b/run0063\n\n************************************Summary*************************************\n\n Submit Directory   : /home/hsafri/LLM-Fine-Tune/generated_workflows/hsafri/pegasus/falcon-7b/run0063\n Workflow Status    : failure\n Total jobs         :      5 (100.00%)\n # jobs succeeded   :      2 (40.00%)\n # jobs failed      :      0 (0.00%)\n # jobs held        :      1 (20.00%)\n # jobs unsubmitted :      3 (60.00%)\n\n*******************************Held jobs' details*******************************\n\n=============================FineTuneLLM_ID0000001==============================\n\nsubmit file            : FineTuneLLM_ID0000001.sub\nlast_job_instance_id   : 3\nreason                 :  Transfer output files failure at execution point slot1_1@testpool-gpu-20250326145715.novalocal while sending files to access point pegasus. Details: reading from file /var/lib/condor/execute/dir_1583/falcon-7b.zip: (errno 2) No such file or directory\n\n2025-04-28 13:53:31,895:ERROR:pegasus-analyzer(1507): Workflow Failed  wf_uuid: 3d41868c-0407-465f-bd1e-32930ef94034 submit dir: /home/hsafri/LLM-Fine-Tune/generated_workflows/hsafri/pegasus/falcon-7b/run0063\n2025-04-28 13:53:31,896:ERROR:pegasus-analyzer(2145): One or more workflows failed\n\n**************************************Done**************************************\n\npegasus-analyzer: end of status report\n",
+    "original_yaml": "/home/hsafri/LLM-Fine-Tune/generated_workflows/hsafri/pegasus/falcon-7b/run0055/falcon-7b.yml",
+    "generated_code": "from Pegasus.api import *\nimport os\n\nclass Falcon_7bWorkflow:\n    \"\"\"\n    A Pegasus workflow for falcon-7b.\n    \"\"\"\n    def __init__(self, base_dir=\".\"):\n        \"\"\"\n        Initialize the workflow, sites, replicas, transformations, and job containers.\n        \n        :param base_dir: Base directory for the workflow (default: current directory)\n        \"\"\"\n        self.base_dir = base_dir\n        \n        # Change to the workflow directory for all operations\n        # This ensures catalog files are written to the correct location\n        os.chdir(self.base_dir)\n        \n        self.wf = Workflow(name=\"falcon-7b\")\n        self.sites = SiteCatalog()\n        self.replicas = ReplicaCatalog()\n        self.transformations = TransformationCatalog()\n        self.files = {}\n        self.jobs = {}\n\n    def build_sites(self):\n        local = Site(\"local\")\n        local.add_directories(Directory(Directory.SHARED_SCRATCH, \"/home/hsafri/LLM-Fine-Tune/scratch\").add_file_servers(FileServer(\"file:///home/hsafri/LLM-Fine-Tune/scratch\", Operation.ALL)))\n        local.add_directories(Directory(Directory.LOCAL_STORAGE, \"/home/hsafri/LLM-Fine-Tune/output\").add_file_servers(FileServer(\"file:///home/hsafri/LLM-Fine-Tune/output\", Operation.ALL)))\n        self.sites.add_sites(local)\n\n        condorpool = Site(\"condorpool\")\n        condorpool.add_profiles(Namespace.CONDOR, key=\"universe\", value=\"vanilla\")\n        condorpool.add_profiles(Namespace.PEGASUS, key=\"style\", value=\"condor\")\n        self.sites.add_sites(condorpool)\n\n    def build_replicas(self):\n        self.replicas.add_replica(\"local\", \"pegasus_data\", \"/home/hsafri/LLM-Fine-Tune/data/data.json\")\n\n    def build_transformations(self):\n        container = Container(\"FineTuneLLM\", Container.SINGULARITY, \"docker://swarmourr/finetune-pegasus:amd64\", image_site=\"docker_hub\")\n        self.transformations.add_containers(container)\n\n        transformation = Transformation(\"FineTuneLLM\", site=\"condorpool\", pfn=\"/home/hsafri/LLM-Fine-Tune/bin/finetune.py\", is_stageable=True)\n        transformation.add_profiles(Namespace.PEGASUS, key=\"cores\", value=\"4\")\n        transformation.add_profiles(Namespace.PEGASUS, key=\"memory\", value=\"10600\")\n        transformation.add_profiles(Namespace.PEGASUS, key=\"gpus\", value=\"1\")\n        self.transformations.add_transformations(transformation)\n\n    def build_jobs(self):\n        job = Job(\"FineTuneLLM\", _id=\"ID0000001\")\n        job.add_args(\"--data_path\", \"pegasus_data\", \"--model_name\", \"tiiuae/falcon-7b\", \"--output_dir\", \"tiiuae/falcon-7b\", \"--num_train_epochs\", \"3\", \"--batch_size\", \"4\", \"--save_steps\", \"5000\", \"--learning_rate\", \"3e-05\", \"--gpu\", \"1\", \"--auth_token\", \"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\")\n        job.add_inputs(self._get_file(\"pegasus_data\"))\n        job.add_outputs(self._get_file(\"falcon-7b.zip\"), stage_out=True, register_replica=True)\n        self.jobs[\"ID0000001\"] = job\n        self.wf.add_jobs(job)\n\n    def _get_file(self, name):\n        if name not in self.files:\n            self.files[name] = File(name)\n        return self.files[name]\n\n    def write(self):\n        \"\"\"\n        Write the site, replica, transformation, and workflow to their respective catalogs and files.\n        \"\"\"\n        # Write all catalog files\n        self.sites.write()\n        self.replicas.write()\n        self.transformations.write()\n        self.wf.write()\n\nif __name__ == \"__main__\":\n    import os\n    import sys\n    \n    # Get the directory where this script is located\n    current_dir = os.path.dirname(os.path.abspath(__file__))\n    \n    # Initialize workflow with current directory\n    w = Falcon_7bWorkflow(base_dir=current_dir)\n    w.build_sites()\n    w.build_replicas()\n    w.build_transformations()\n    w.build_jobs()\n    w.write()\n    print(\"Workflow generated and written successfully in: \" + current_dir)"
+    }
 
 
     try:
         agent = PegasusAgent()
         result = await agent.analyze_event(example_event)
+        print("=== Analysis Result ===")
+        print(json.dumps(result, indent=2))
         corrected_code = result.get("execution", {}).get("corrected_generated_code", "")
 
         # If the code is incomplete, merge with the original

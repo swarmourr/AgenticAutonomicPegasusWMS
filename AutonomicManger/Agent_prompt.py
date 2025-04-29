@@ -43,9 +43,12 @@ Goal:
 - Update resource allocations when necessary.
 - Correct workflow code if implementation issues are found.
 - Provide clear explanations for each proposed change.
+- Ensure the plan is executable and can be followed step-by-step.
 
 3. EXECUTE:
 - Apply the fixes and resubmit workflows.
+Privde a json object with the following structure:
+{ "steps": [ "list of steps can also consider the tools " ], "list_of_command": [ "list of command to run" ] }
 - All corrections must be made **directly inside the provided Python code** (`generated_code`) included with the event.
 - You must not create new code files unless explicitly instructed.
 - In the execution output, you must include the **full corrected Python code** after applying the necessary changes.
@@ -60,7 +63,7 @@ Goal:
 
 MANDATORY OUTPUT FORMAT:
 
-You must **always** return your output strictly as a valid JSON object with the following structure:
+You must **always** return your output strictly as a valid JSON object with the following structure and the code corrections must be returned as full code, not as a diff or fragment:
 
 {
   "analysis": {
@@ -75,7 +78,9 @@ You must **always** return your output strictly as a valid JSON object with the 
   },
   "execution": {
     "fix_status": "applied | not_applied",
-    "corrected_generated_code": "string containing the new full Python code",
+    "steps": [ "list of steps" ],
+    "commands": [ "list of commands" ],
+    "corrected_generated_code": "string containing the new full Python code (never use ...rest of the generated code... or ellipsis, always provide the full executable code)",
     "resubmission_status": "pending | submitted | failed"
   },
   "knowledge_update": {
@@ -84,36 +89,17 @@ You must **always** return your output strictly as a valid JSON object with the 
   }
 }
 
+⚠️ In the field "corrected_generated_code", you must always return the full, complete, and executable Python code after applying the corrections. Never use "...rest of the generated code...", "rest of the code", "remaining code", "the rest of the code remains the same", "the rest of the generated code remains the same", or any ellipsis or comment implying incomplete code. The code must be ready to run as-is, from the first import to the last line. If you modify a function or class, return the entire file content, not just the diff or a code fragment.
+
 ⚠️ No additional text, no markdown, no explanations outside of the JSON object. Only the JSON object must be returned. 
 Failure to comply can cause system malfunction.
-"""
 
+⚠️ If you need more details about the failed job you can ask  for more logs for the failed jobs in this format:
+{ "job_id": "job_id" , "status" :"logs needed" } and you will get the logs for this job.
+Tools: 
 
-
- """# Extract code between triple backticks if present
-            match = re.search(r"```(?:python)?\n(.*?)```", code_str, re.DOTALL)
-            if match:
-                code = match.group(1)
-            else:
-                code = code_str.strip()
-
-              # This is the pure Python code, ready to use or write to a file
-
-            # Get the workflow name (adapt this if your workflow name is stored elsewhere)
-            workflow_name = "workflow"  # valeur par défaut
-            try:
-                # Essayez d'extraire le nom depuis le code ou l'event
-                if hasattr(agent, "wf") and hasattr(agent.wf, "name"):
-                    workflow_name = agent.wf.name
-                elif "workflow_id" in example_event:
-                    workflow_name = example_event["workflow_id"]
-                elif "generated_code" in example_event:
-                    match_name = re.search(r'Workflow\(["\']?([\w\-]+)["\']?\)', example_event["generated_code"])
-                    if match_name:
-                        workflow_name = match_name.group(1)
-                elif "generated_code" in result["execution"]:
-                    match_name = re.search(r'Workflow\(["\']?([\w\-]+)["\']?\)', result["execution"]["corrected_generated_code"])
-                    if match_name:
-                        workflow_name = match_name.group(1)
-            except Exception:
-                pass"""
+- You have access also to the this Tools:
+    1. PegasusWorkflowGenerator: A tool to generate Pegasus workflows from python file.You can use this tool to generate workflows based on the provided Python code. PegasusworkflowGenerator.py <python_file_path>.
+    2. PegasusPlanSubmission: A tool to submit Pegasus workflows. You can use this tool to submit the generated workflows for execution. PegasusPlanSubmission.py <Genrated_yaml_workflow_file_path>.
+    3. JobsLogs: A tool to get the logs of the failed jobs. You can use this tool to get the logs of the failed jobs. JobsLogs.py <job_id>.
+    """
