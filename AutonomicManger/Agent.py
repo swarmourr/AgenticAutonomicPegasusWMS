@@ -22,6 +22,7 @@ logger = logging.getLogger("MAPE-K")
 mape_k_system_prompt = """
 You are a MAPE-K (Monitor, Analyze, Plan, Execute, Knowledge) agent specialized in managing scientific and computational workflows.
 You will receive notifications about workflow failures and are responsible for analyzing the logs, planning a solution, and executing the fix.
+
 - You are activated when a workflow failure event occurs.
 - Each event contains workflow logs, error messages, workflow descriptors, and generated execution code.
 - You do not actively poll for issues; instead, you respond to external notification events.
@@ -68,8 +69,11 @@ Goal:
 
 3. EXECUTE:
 - Apply the fixes and resubmit workflows.
-Privde a json object with the following structure:
-{ "steps": [ "list of steps can also consider the tools " ], "list_of_command": [ "list of command to run" ] }
+- Provide a JSON object with the following structure:
+{
+  "steps": [ "list of steps, can also consider the tools" ],
+  "list_of_command": [ "list of command to run" ]
+}
 - All corrections must be made **directly inside the provided Python code** (`generated_code`) included with the event.
 - You must not create new code files unless explicitly instructed.
 - In the execution output, you must include the **full corrected Python code** after applying the necessary changes.
@@ -85,7 +89,7 @@ Privde a json object with the following structure:
 MANDATORY OUTPUT FORMAT:
 
 You must **always** return your output strictly as a valid JSON object with the following structure and the code corrections must be returned as full code, not as a diff or fragment:
-
+if no more information needed return:
 {
   "analysis": {
     "root_cause": "string",
@@ -107,7 +111,15 @@ You must **always** return your output strictly as a valid JSON object with the 
   "knowledge_update": {
     "insights": "string",
     "actionable_lessons": "string"
-  }
+  },
+  "logs_needed": "NO",
+}
+
+If you need more logs for the failed jobs you can ask for more logs for the failed jobs in this format:
+{
+  "job_id": "job_id",
+  "logs": "YES",
+  "directory": "directory"
 }
 
 ⚠️ In the field "corrected_generated_code", you must always return the full, complete, and executable Python code after applying the corrections. Never use "...rest of the generated code...", "rest of the code", "remaining code", "the rest of the code remains the same", "the rest of the generated code remains the same", or any ellipsis or comment implying incomplete code. The code must be ready to run as-is, from the first import to the last line. If you modify a function or class, return the entire file content, not just the diff or a code fragment.
@@ -115,15 +127,16 @@ You must **always** return your output strictly as a valid JSON object with the 
 ⚠️ No additional text, no markdown, no explanations outside of the JSON object. Only the JSON object must be returned. 
 Failure to comply can cause system malfunction.
 
-⚠️ If you need more details about the failed job you can ask  for more logs for the failed jobs in this format:
+⚠️ If you need more details about the failed job you can ask for more logs for the failed jobs in this format:
 { "job_id": "job_id" , "status" :"logs needed" } and you will get the logs for this job.
+
 Tools: 
 
-- You have access also to the this Tools:
-    1. PegasusWorkflowGenerator: A tool to generate Pegasus workflows from python file.You can use this tool to generate workflows based on the provided Python code. PegasusworkflowGenerator.py <python_file_path>.
+- You have access also to these Tools:
+    1. PegasusWorkflowGenerator: A tool to generate Pegasus workflows from python file. You can use this tool to generate workflows based on the provided Python code. PegasusworkflowGenerator.py <python_file_path>.
     2. PegasusPlanSubmission: A tool to submit Pegasus workflows. You can use this tool to submit the generated workflows for execution. PegasusPlanSubmission.py <Genrated_yaml_workflow_file_path>.
     3. JobsLogs: A tool to get the logs of the failed jobs. You can use this tool to get the logs of the failed jobs. JobsLogs.py <job_id>.
-    """
+"""
 
 class WorkflowAnalyzer:
     """Classe pour analyser les workflows Pegasus"""
@@ -224,34 +237,59 @@ class PegasusAgent:
                 "analysis": validated_response.get("analysis", {}),
                 "plan": validated_response.get("plan", {}),
                 "execution": validated_response.get("execution", {}),
-                "knowledge_update": validated_response.get("knowledge_update", {})
+                "knowledge_update": validated_response.get("knowledge_update", {}),
+                "logs_needed": validated_response.get("logs_needed", "NO")  # Ajout de logs_needed
             }
         except Exception as e:
             logger.error(f"Erreur lors de l'analyse de l'événement: {str(e)}")
             return {
                 "error": str(e),
-                "status": "failed"
+                "status": "failed",
+                "logs_needed": "NO"  # Ajout aussi dans le cas d'erreur
             }
 
     def _validate_response(self, response: str) -> Dict[str, Any]:
-        """Valide et nettoie la réponse de l'agent"""
+        """Valide et nettoie la réponse de l'agent, gère aussi la demande de logs supplémentaires"""
         try:
-            # Extract the first valid JSON object from the response
+            # Extraction robuste du JSON
             if isinstance(response, str):
-                json_match = re.search(r'(\{.*?\})', response, re.DOTALL)
-                if json_match:
-                    response = json.loads(json_match.group(1))
-                else:
-                    raise ValueError("La réponse ne contient pas de JSON valide")
+                response_obj = _extract_json_object(response)
+            else:
+                response_obj = response
 
-            # Ensure all required keys are present
+            # Cas 1 : Demande explicite de logs supplémentaires (format strict)
+            if (
+                isinstance(response_obj, dict)
+                and "logs" in response_obj
+                and str(response_obj.get("logs", "")).upper() == "YES"
+                and "job_id" in response_obj
+                and "directory" in response_obj
+            ):
+                logger.info("Le LLM demande plus de logs pour le job : %s", response_obj["job_id"])
+                return response_obj
+
+            # Cas 2 : Demande de logs via le format alternatif { "job_id": ..., "status": "logs needed" }
+            if (
+                isinstance(response_obj, dict)
+                and str(response_obj.get("status", "")).lower() == "logs needed"
+                and "job_id" in response_obj
+            ):
+                logger.info("Le LLM demande plus de logs (format alternatif) pour le job : %s", response_obj["job_id"])
+                return response_obj
+
+            # Cas 3 : Erreur simple
+            if isinstance(response_obj, dict) and "error" in response_obj:
+                logger.error(f"Erreur retournée par le LLM: {response_obj.get('error')}")
+                return response_obj
+
+            # Cas 4 : Réponse complète attendue
             required_keys = ["analysis", "plan", "execution", "knowledge_update"]
             for key in required_keys:
-                if key not in response:
+                if key not in response_obj:
                     raise ValueError(f"Clé manquante dans la réponse: {key}")
 
-            # Check for forbidden patterns in corrected code
-            corrected_code = response["execution"].get("corrected_generated_code", "")
+            # Vérification du code complet dans corrected_generated_code
+            corrected_code = response_obj["execution"].get("corrected_generated_code", "")
             forbidden_patterns = [
                 "rest of the generated code",
                 "rest of the code",
@@ -263,7 +301,7 @@ class PegasusAgent:
             if any(pattern in corrected_code for pattern in forbidden_patterns):
                 logger.warning("⚠️ Le code retourné n'est pas complet. Merci de reformuler la demande ou d'ajuster le prompt système.")
 
-            return response
+            return response_obj
         except json.JSONDecodeError as e:
             logger.error(f"Erreur de décodage JSON: {str(e)}")
             return {
@@ -300,7 +338,19 @@ async def merge_codes_with_llm(llm, original_code: str, partial_code: str) -> st
     response = await llm.acomplete(prompt=merge_prompt , temperature=0.1, max_tokens=10000)
     return response.text.strip()
 
+def _extract_json_object(text: str) -> dict:
+    """Extrait le premier objet JSON valide d'une chaîne."""
+    import json
+    start = text.find('{')
+    while start != -1:
+        try:
+            return json.loads(text[start:])
+        except json.JSONDecodeError:
+            start = text.find('{', start + 1)
+    raise ValueError("Aucun objet JSON valide trouvé dans la réponse.")
+
 async def main():
+    """Fonction principale pour tester l'agent"""
     """Fonction principale pour tester l'agent"""
     
     # Exemple d'événement de workflow échoué plus détaillé
@@ -347,15 +397,20 @@ async def main():
     "generated_code": "from Pegasus.api import *\nimport os\n\nclass Falcon_7bWorkflow:\n    \"\"\"\n    A Pegasus workflow for falcon-7b.\n    \"\"\"\n    def __init__(self, base_dir=\".\"):\n        \"\"\"\n        Initialize the workflow, sites, replicas, transformations, and job containers.\n        \n        :param base_dir: Base directory for the workflow (default: current directory)\n        \"\"\"\n        self.base_dir = base_dir\n        \n        # Change to the workflow directory for all operations\n        # This ensures catalog files are written to the correct location\n        os.chdir(self.base_dir)\n        \n        self.wf = Workflow(name=\"falcon-7b\")\n        self.sites = SiteCatalog()\n        self.replicas = ReplicaCatalog()\n        self.transformations = TransformationCatalog()\n        self.files = {}\n        self.jobs = {}\n\n    def build_sites(self):\n        local = Site(\"local\")\n        local.add_directories(Directory(Directory.SHARED_SCRATCH, \"/home/hsafri/LLM-Fine-Tune/scratch\").add_file_servers(FileServer(\"file:///home/hsafri/LLM-Fine-Tune/scratch\", Operation.ALL)))\n        local.add_directories(Directory(Directory.LOCAL_STORAGE, \"/home/hsafri/LLM-Fine-Tune/output\").add_file_servers(FileServer(\"file:///home/hsafri/LLM-Fine-Tune/output\", Operation.ALL)))\n        self.sites.add_sites(local)\n\n        condorpool = Site(\"condorpool\")\n        condorpool.add_profiles(Namespace.CONDOR, key=\"universe\", value=\"vanilla\")\n        condorpool.add_profiles(Namespace.PEGASUS, key=\"style\", value=\"condor\")\n        self.sites.add_sites(condorpool)\n\n    def build_replicas(self):\n        self.replicas.add_replica(\"local\", \"pegasus_data\", \"/home/hsafri/LLM-Fine-Tune/data/data.json\")\n\n    def build_transformations(self):\n        container = Container(\"FineTuneLLM\", Container.SINGULARITY, \"docker://swarmourr/finetune-pegasus:amd64\", image_site=\"docker_hub\")\n        self.transformations.add_containers(container)\n\n        transformation = Transformation(\"FineTuneLLM\", site=\"condorpool\", pfn=\"/home/hsafri/LLM-Fine-Tune/bin/finetune.py\", is_stageable=True)\n        transformation.add_profiles(Namespace.PEGASUS, key=\"cores\", value=\"4\")\n        transformation.add_profiles(Namespace.PEGASUS, key=\"memory\", value=\"10600\")\n        transformation.add_profiles(Namespace.PEGASUS, key=\"gpus\", value=\"1\")\n        self.transformations.add_transformations(transformation)\n\n    def build_jobs(self):\n        job = Job(\"FineTuneLLM\", _id=\"ID0000001\")\n        job.add_args(\"--data_path\", \"pegasus_data\", \"--model_name\", \"tiiuae/falcon-7b\", \"--output_dir\", \"tiiuae/falcon-7b\", \"--num_train_epochs\", \"3\", \"--batch_size\", \"4\", \"--save_steps\", \"5000\", \"--learning_rate\", \"3e-05\", \"--gpu\", \"1\", \"--auth_token\", \"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\")\n        job.add_inputs(self._get_file(\"pegasus_data\"))\n        job.add_outputs(self._get_file(\"falcon-7b.zip\"), stage_out=True, register_replica=True)\n        self.jobs[\"ID0000001\"] = job\n        self.wf.add_jobs(job)\n\n    def _get_file(self, name):\n        if name not in self.files:\n            self.files[name] = File(name)\n        return self.files[name]\n\n    def write(self):\n        \"\"\"\n        Write the site, replica, transformation, and workflow to their respective catalogs and files.\n        \"\"\"\n        # Write all catalog files\n        self.sites.write()\n        self.replicas.write()\n        self.transformations.write()\n        self.wf.write()\n\nif __name__ == \"__main__\":\n    import os\n    import sys\n    \n    # Get the directory where this script is located\n    current_dir = os.path.dirname(os.path.abspath(__file__))\n    \n    # Initialize workflow with current directory\n    w = Falcon_7bWorkflow(base_dir=current_dir)\n    w.build_sites()\n    w.build_replicas()\n    w.build_transformations()\n    w.build_jobs()\n    w.write()\n    print(\"Workflow generated and written successfully in: \" + current_dir)"
     }
 
-
     try:
         agent = PegasusAgent()
         result = await agent.analyze_event(example_event)
         print("=== Analysis Result ===")
         print(json.dumps(result, indent=2))
-        corrected_code = result.get("execution", {}).get("corrected_generated_code", "")
 
-        # If the code is incomplete, merge with the original
+        # Récupérer le code corrigé
+        corrected_code = result.get("execution", {}).get("corrected_generated_code")
+        
+        if not corrected_code:
+            logger.error("Aucun code corrigé à écrire dans le fichier.")
+            return
+
+        # Si le code est incomplet, fusionner avec l'original
         if (
             "..." in corrected_code
             or "rest of the code" in corrected_code
@@ -367,17 +422,21 @@ async def main():
             original_code = example_event.get("generated_code", "")
             merged_code = await merge_codes_with_llm(agent.llm, original_code, corrected_code)
             result["execution"]["corrected_generated_code"] = merged_code
-           
-        # Write the code to a .py file named after the workflow
-        py_filename = f"workflowtest.py"
+            corrected_code = merged_code
+
+        # Écrire le code dans un fichier .py
+        py_filename = "workflowtest.py"
         with open(py_filename, "w") as pyfile:
-                pyfile.write(corrected_code)
+            pyfile.write(corrected_code)
         print(f"✅ Python code written to {py_filename}")
 
+        # Écrire les résultats d'analyse
         print("\n=== Analysis Results ===")
         print(json.dumps(result, indent=2))
         with open("pegasus_analysis_result.json", "w") as f:
             json.dump(result, f, indent=2)
+
+        # Afficher le résumé des actions recommandées
         if "analysis" in result and "root_cause" in result["analysis"]:
             print("\n=== Recommended Actions Summary ===")
             print(f"Root cause: {result['analysis']['root_cause']}")
@@ -385,10 +444,10 @@ async def main():
                 print("\nSteps to follow:")
                 for i, step in enumerate(result["plan"]["steps"], 1):
                     print(f"{i}. {step}")
+
     except Exception as e:
         logger.error(f"Error in main: {str(e)}")
         raise
 
 if __name__ == "__main__":
-    # Exécuter le main asynchrone
     asyncio.run(main())

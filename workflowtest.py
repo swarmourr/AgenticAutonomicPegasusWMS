@@ -44,7 +44,7 @@ class Falcon_7bWorkflow:
 
         transformation = Transformation("FineTuneLLM", site="condorpool", pfn="/home/hsafri/LLM-Fine-Tune/bin/finetune.py", is_stageable=True)
         transformation.add_profiles(Namespace.PEGASUS, key="cores", value="4")
-        transformation.add_profiles(Namespace.PEGASUS, key="memory", value="16384")  # Increased memory request
+        transformation.add_profiles(Namespace.PEGASUS, key="memory", value="16384")  # Increased memory from 10600 to 16384
         transformation.add_profiles(Namespace.PEGASUS, key="gpus", value="1")
         self.transformations.add_transformations(transformation)
 
